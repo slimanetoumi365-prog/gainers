@@ -30,7 +30,6 @@ adapter = HTTPAdapter(
 )
 session.mount("https://", adapter)
 
-# Morocco Timezone (GMT+1)
 MOROCCO_TZ = timezone(timedelta(hours=1))
 
 def load_json(path):
@@ -45,15 +44,6 @@ def load_json(path):
 def save_json(path, data):
     with open(path, 'w') as f:
         json.dump(data, f)
-
-def format_number(num):
-    if num is None:
-        return "N/A"
-    if num >= 1_000_000:
-        return f"${num / 1_000_000:.1f}M"
-    elif num >= 1_000:
-        return f"${num / 1_000:.0f}K"
-    return f"${num:.0f}"
 
 def send_telegram_alert(msg: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -80,7 +70,6 @@ def seconds_until_next_15min() -> float:
     return (target - now).total_seconds()
 
 def get_24hr_tickers():
-    """Fetches all 24h tickers in one request to save API weight and prevent rate limits."""
     try:
         resp = session.get("https://api.binance.com/api/v3/ticker/24hr", timeout=10)
         resp.raise_for_status()
@@ -88,9 +77,7 @@ def get_24hr_tickers():
         return {
             item['symbol']: {
                 'vol': float(item['quoteVolume']), 
-                'pc': float(item['priceChangePercent']),
-                'high': float(item['highPrice']),
-                'low': float(item['lowPrice'])
+                'pc': float(item['priceChangePercent'])
             } 
             for item in data
         }
@@ -112,9 +99,7 @@ def scan_symbol(sym: str):
 
         closed = data[:-1]
         volumes = [float(c[5]) for c in closed]
-        closes = [float(c[4]) for c in closed]
 
-        # Count consecutive rising volumes
         count = 1
         for i in range(len(volumes) - 1, 0, -1):
             if volumes[i] > volumes[i - 1]:
@@ -122,7 +107,6 @@ def scan_symbol(sym: str):
             else:
                 break
 
-        # Start from 3 consecutive rising volumes (3, 4, 5, 6, etc.)
         if count < 3:
             return None
 
@@ -135,8 +119,6 @@ def scan_symbol(sym: str):
 
         close_p = float(last[4])
         open_p = float(last[1])
-        high_p = float(last[2])
-        low_p = float(last[3])
         prev_close = float(prev[4])
         prev_open = float(prev[1])
 
@@ -145,14 +127,8 @@ def scan_symbol(sym: str):
         if pc < PC_ALERT:
             return None
 
-        full_range = high_p - low_p
-        body = abs(close_p - open_p)
-        body_pct = (body / full_range * 100) if full_range > 0 else 0
-
         prev_color = "Green" if float(prev[4]) >= prev_open else "Red"
         green_count = sum(1 for c in streak if float(c[4]) >= float(c[1]))
-        
-        last_vol_usdt = float(last[5]) * close_p
 
         return {
             "sym": sym.replace("USDT", ""),
@@ -161,10 +137,8 @@ def scan_symbol(sym: str):
             "pc": pc,
             "vol_ratio": vol_ratio,
             "streak_ratio": streak_ratio,
-            "body_pct": body_pct,
             "prev_color": prev_color,
             "green_count": green_count,
-            "last_vol_usdt": last_vol_usdt,
         }
     except Exception:
         return None
@@ -186,7 +160,6 @@ def main():
             t0 = time.time()
             print(f"\n[SCAN] Scanning {len(SYMBOLS)} coins...")
 
-            # Fetch 24h data once per scan (Highly efficient)
             tickers_24h = get_24hr_tickers()
             results = []
 
@@ -202,46 +175,20 @@ def main():
                         if not sym_data:
                             continue
 
-                        vol_24h = sym_data['vol']
                         day_pc = sym_data['pc']
-                        high_24h = sym_data['high']
-                        low_24h = sym_data['low']
-
-                        # --- STRICT FILTERING RULES ---
-                        
-                        # Rule 1: day_pc must be between +1.00% and +6.00%
-                        if not (1.0 <= day_pc <= 6.0):
-                            continue
-
-                        # Rule 2: vol_ratio must be strictly > 2.5
-                        if result['vol_ratio'] <= 2.5:
-                            continue
-
-                        # --- END STRICT FILTERING ---
+                        vol_24h = sym_data['vol']
 
                         last_alerted_count = alerted.get(sym, {}).get("count", 0)
-                        last_alerted_ts = alerted.get(sym, {}).get("ts", 0)
-
-                        if now_ts - last_alerted_ts > 2 * 3600:
-                            last_alerted_count = 0
-
                         count = result["count"]
+                        
+                        # Only alerts if the streak count increases
                         if count > last_alerted_count:
                             if sym in prev_scan_syms:
                                 alerted[sym] = {"count": count, "ts": now_ts}
                                 continue
                             
-                            # Calculate remaining metrics for display
-                            avg_15m_vol_usdt = vol_24h / 96
-                            vs_avg = result['last_vol_usdt'] / avg_15m_vol_usdt if avg_15m_vol_usdt > 0 else 0
-                            dist_high = ((result['close'] - high_24h) / high_24h * 100) if high_24h else None
-                            dist_low = ((result['close'] - low_24h) / low_24h * 100) if low_24h else None
-
                             result["vol_24h"] = vol_24h
                             result["day_pc"] = day_pc
-                            result["vs_avg"] = vs_avg
-                            result["dist_high"] = dist_high
-                            result["dist_low"] = dist_low
                             
                             results.append(result)
                             alerted[sym] = {"count": count, "ts": now_ts}
@@ -257,23 +204,12 @@ def main():
                 for c in results:
                     pc_str = f"{c['pc']:+.2f}%"
                     day_str = f"{c['day_pc']:+.2f}%" if c["day_pc"] is not None else "N/A"
-                    dist_high_str = f"{c['dist_high']:+.1f}%" if c["dist_high"] is not None else "N/A"
-                    dist_low_str = f"+{c['dist_low']:.1f}%" if c["dist_low"] is not None else "N/A"
-                    vs_avg_str = f"x{c['vs_avg']:.1f}" if c["vs_avg"] is not None else "N/A"
-
+                    
                     lines.append(
-                        f"Symbol: {c['sym']}\n"
-                        f"Price: {c['close']}\n"
-                        f"15m Change: {pc_str}\n"
-                        f"24h Change: {day_str}\n"
-                        f"24h Volume: {format_number(c['vol_24h'])}\n"
-                        f"Vol Ratio: {c['vol_ratio']:.1f}x [{c['count']} streak]\n"
-                        f"Prev Candle: {c['prev_color']} | Body: {c['body_pct']:.0f}%\n"
-                        f"Green Candles: {c['green_count']}/{c['count']} | Streak Ratio: x{c['streak_ratio']:.1f}\n"
-                        f"Vs Avg Vol: {vs_avg_str}\n"
-                        f"Dist 24h High: {dist_high_str} | Dist 24h Low: {dist_low_str}\n"
-                        f"{'-' * 30}"
+                        f"🚀 {c['sym']} 💰{c['close']} 📈{pc_str} x{c['vol_ratio']:.1f}\n"
+                        f"📅{day_str} greens: {c['green_count']}/{c['count']} streak: x{c['streak_ratio']:.1f}"
                     )
+                    lines.append("") # Empty line between coins
 
                 send_telegram_alert("\n".join(lines))
                 print("\n".join(lines))

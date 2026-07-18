@@ -14,6 +14,9 @@ TELEGRAM_CHAT_ID = '1692583809'
 
 ALERTED_FILE = "alerted_coins.json"
 PC_ALERT = 1.99
+RSI_PERIOD = 14
+RSI_MIN = 44.0
+RSI_MAX = 65.0
 
 RAW_SYMBOLS = """
 0G 1000CAT 1000CHEEMS 1000SATS 1INCH 1MBABYDOGE 2Z AAVE ACE ACH ACM ACT ACX ADA ADX AEVO AGLD AIGENSYN AI AIXBT ALGO ALICE ALLO ALPINE ALT AMP ANIME ANKR APE API3 APT ARB ARKM ARK ARPA AR ASR ASTER ASTR ATM ATOM AT AUCTION AUDIO A AVA AVAX AVNT AWE AXL AXS BABY BANANAS31 BANANA BAND BANK BARD BAR BAT BB BCH BEAMX BEL BERA BICO BIGTIME BIO BLUR BMT BNB BNSOL BNT BOME BONK BREV BROCCOLI714 C98 CAKE CATI CELO CELR CETUS CFG CFX CGPT CHIP CHR CHZ CITY CKB COMP COOKIE COTI COW CRV CTK CTSI C CVC CVX CYBER DASH DCR DEXE DGB DIA DODO DOGE DOGS DOLO DOT DUSK DYDX DYM EDEN EDU EGLD EIGEN ENA ENJ ENSO ENS EPIC ERA ESP ETC EUL FET FF FIDA FIL FLOKI FLOW FLUX FOGO FORM FRAX FTT F GALA GAS GENIUS GIGGLE GLMR GLM GMT GMX GNO GNS GPS GRT GTC GUN G HAEDAL HBAR HEI HEMI HFT HIVE HMSTR HOLO HOME HOT HUMA HYPER ICP ICX ID ILV IMX INIT INJ IOST IOTA IOTX IO IQ JASMY JOE JST JTO JUP JUV KAIA KAITO KAT KAVA KERNEL KGST KITE KMNO KNC KSM LA LAYER LAZIO LDO LINEA LINK LISTA LPT LQTY LSK LTC LUMIA LUNA LUNC MAGIC MANA MANTA MANTRA MASK MAV MBL MEGA MEME METIS MET ME MINA MIRA MITO MMT MORPHO MOVE MOVR MTL MUBARAK NEAR NEIRO NEO NEWT NEXO NIGHT NIL NMR NOM NOT NXPC OGN OG ONDO ONE ONG ONT OPEN OPG OPN OP ORCA ORDI OSMO PARTI PENDLE PENGU PEOPLE PEPE PHA PIVX PIXEL PLUME PNUT POL POLYX PORTAL PORTO POWR PROM PROVE PSG PUMP PUNDIX PYR PYTH QI QKC QNT QTUM QUICK RAD RARE RAY RE RED RENDER REQ RESOLV REZ RIF RLC ROBO RONIN ROSE RPL RSR RUNE RVN SAGA SAHARA SAND SANTOS SAPIEN SCRT SCR SC SEI SENT SFP SHELL SHIB SIGN SKL SKY SLP SNX SOL SOLV SOMI SOPH SPELL SPK SSV STEEM STG STORJ STO STRAX STRK STX SUI SUN SUPER S SUSHI SXT SYN SYRUP TAO TFUEL THETA THE TIA TKO TLM TNSR TON TOWNS TRB TREE TRUMP TRX TST TURBO TURTLE T TUT TWT UMA UNI USUAL U VANA VANRY VELODROME VET VIC VIRTUAL VTHO WAL WAXP WCT WIF WIN WLD WLFI WOO W XAI XEC XLM XNO XPL XRP XTZ XVG XVS YB YFI YGG ZAMA ZBT ZEC ZEN ZIL ZKC ZKP ZK ZRO ZRX
@@ -68,6 +71,35 @@ def seconds_until_next_15min() -> float:
         target = now.replace(minute=next_minute, second=2, microsecond=0)
     return (target - now).total_seconds()
 
+def calculate_rsi_wilders(closes, period=14):
+    """
+    Calculates RSI using Wilder's Smoothing Method.
+    Requires at least 200 candles for perfect Binance match.
+    """
+    if len(closes) < period + 1:
+        return None
+    
+    gains = []
+    losses = []
+    for i in range(1, len(closes)):
+        diff = closes[i] - closes[i-1]
+        gains.append(max(diff, 0))
+        losses.append(max(-diff, 0))
+    
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+        
+    if avg_loss == 0:
+        return 100.0
+    
+    rs = avg_gain / avg_loss
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    return rsi
+
 def get_24hr_tickers():
     try:
         resp = session.get("https://api.binance.com/api/v3/ticker/24hr", timeout=10)
@@ -80,9 +112,10 @@ def get_24hr_tickers():
 
 def scan_symbol(sym: str):
     try:
+        # Fetch 200 candles for perfect Wilder's smoothing convergence
         resp = session.get(
             "https://api.binance.com/api/v3/klines",
-            params={"symbol": sym, "interval": "15m", "limit": 20},
+            params={"symbol": sym, "interval": "15m", "limit": 200},
             timeout=5
         )
         resp.raise_for_status()
@@ -92,6 +125,7 @@ def scan_symbol(sym: str):
 
         closed = data[:-1]
         volumes = [float(c[5]) for c in closed]
+        closes = [float(c[4]) for c in closed]
 
         count = 1
         for i in range(len(volumes) - 1, 0, -1):
@@ -117,7 +151,13 @@ def scan_symbol(sym: str):
         if pc < PC_ALERT:
             return None
 
-        # Calculate green_count directly without storing streak
+        # Calculate RSI on closed candles (last closed candle only)
+        rsi = calculate_rsi_wilders(closes, RSI_PERIOD)
+        
+        # RSI Filter: must be between 44 and 65
+        if rsi is None or not (RSI_MIN <= rsi <= RSI_MAX):
+            return None
+
         green_count = sum(1 for c in closed[-count:] if float(c[4]) >= float(c[1]))
 
         return {
@@ -128,6 +168,7 @@ def scan_symbol(sym: str):
             "vol_ratio": vol_ratio,
             "streak_ratio": streak_ratio,
             "green_count": green_count,
+            "rsi": rsi,
         }
     except Exception:
         return None

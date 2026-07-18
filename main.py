@@ -9,7 +9,6 @@ from urllib3.util.retry import Retry
 from datetime import timezone, timedelta
 
 # --- Configuration ---
-# ⚠️ WARNING: REPLACE WITH YOUR NEW TOKEN
 TELEGRAM_BOT_TOKEN = '8833328238:AAHD-03Tz7r2kCYxmHn4k62IGwafuv3tyjk'
 TELEGRAM_CHAT_ID = '1692583809'
 
@@ -74,13 +73,7 @@ def get_24hr_tickers():
         resp = session.get("https://api.binance.com/api/v3/ticker/24hr", timeout=10)
         resp.raise_for_status()
         data = resp.json()
-        return {
-            item['symbol']: {
-                'vol': float(item['quoteVolume']), 
-                'pc': float(item['priceChangePercent'])
-            } 
-            for item in data
-        }
+        return {item['symbol']: float(item['quoteVolume']) for item in data}
     except Exception as e:
         print(f"[WARN] Error fetching 24hr tickers: {e}")
         return {}
@@ -110,7 +103,6 @@ def scan_symbol(sym: str):
         if count < 3:
             return None
 
-        streak = closed[-count:]
         last = closed[-1]
         prev = closed[-2]
 
@@ -118,17 +110,15 @@ def scan_symbol(sym: str):
         streak_ratio = volumes[-1] / volumes[-count] if volumes[-count] > 0 else 0
 
         close_p = float(last[4])
-        open_p = float(last[1])
         prev_close = float(prev[4])
-        prev_open = float(prev[1])
 
         pc = ((close_p - prev_close) / prev_close) * 100
 
         if pc < PC_ALERT:
             return None
 
-        prev_color = "Green" if float(prev[4]) >= prev_open else "Red"
-        green_count = sum(1 for c in streak if float(c[4]) >= float(c[1]))
+        # Calculate green_count directly without storing streak
+        green_count = sum(1 for c in closed[-count:] if float(c[4]) >= float(c[1]))
 
         return {
             "sym": sym.replace("USDT", ""),
@@ -137,7 +127,6 @@ def scan_symbol(sym: str):
             "pc": pc,
             "vol_ratio": vol_ratio,
             "streak_ratio": streak_ratio,
-            "prev_color": prev_color,
             "green_count": green_count,
         }
     except Exception:
@@ -171,21 +160,29 @@ def main():
                         sym = result["sym"]
                         full_sym = sym + "USDT"
                         
-                        sym_data = tickers_24h.get(full_sym)
-                        if not sym_data:
-                            continue
-
-                        day_pc = sym_data['pc']
-                        vol_24h = sym_data['vol']
-
                         last_alerted_count = alerted.get(sym, {}).get("count", 0)
                         count = result["count"]
                         
-                        # Only alerts if the streak count increases
                         if count > last_alerted_count:
                             if sym in prev_scan_syms:
                                 alerted[sym] = {"count": count, "ts": now_ts}
                                 continue
+                            
+                            day_pc = None
+                            try:
+                                day_resp = session.get(
+                                    "https://api.binance.com/api/v3/klines",
+                                    params={"symbol": full_sym, "interval": "1d", "limit": 2},
+                                    timeout=5
+                                )
+                                day_resp.raise_for_status()
+                                day_data = day_resp.json()
+                                prev_day_close = float(day_data[-2][4])
+                                day_pc = ((result['close'] - prev_day_close) / prev_day_close) * 100
+                            except Exception:
+                                pass
+
+                            vol_24h = tickers_24h.get(full_sym, 0.0)
                             
                             result["vol_24h"] = vol_24h
                             result["day_pc"] = day_pc
@@ -197,7 +194,6 @@ def main():
             prev_scan_syms = {r["sym"] for r in results}
 
             if results:
-                # Sort by absolute trading volume from high to low
                 results.sort(key=lambda x: x["vol_24h"], reverse=True)
                 
                 lines = [f"BUY SIGNAL - {time_str} (GMT+1)\n"]
@@ -209,7 +205,7 @@ def main():
                         f"🚀 {c['sym']} 💰{c['close']} 📈{pc_str} x{c['vol_ratio']:.1f}\n"
                         f"📅{day_str} greens: {c['green_count']}/{c['count']} streak: x{c['streak_ratio']:.1f}"
                     )
-                    lines.append("") # Empty line between coins
+                    lines.append("")
 
                 send_telegram_alert("\n".join(lines))
                 print("\n".join(lines))

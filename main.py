@@ -9,7 +9,7 @@ from urllib3.util.retry import Retry
 from datetime import timezone, timedelta
 
 # --- Configuration ---
-TELEGRAM_BOT_TOKEN = 'YOUR_NEW_BOT_TOKEN_HERE'
+TELEGRAM_BOT_TOKEN = '8833328238:AAHD-03Tz7r2kCYxmHn4k62IGwafuv3tyjk'
 TELEGRAM_CHAT_ID = '1692583809'
 
 ALERTED_FILE = "alerted_coins.json"
